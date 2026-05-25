@@ -371,7 +371,6 @@ register_op(OpConfig(
 ))
 
 
-
 # --- E: +head gate (g=[B,T,H] with logsigmoid) ---
 
 register_op(OpConfig(
