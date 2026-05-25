@@ -583,8 +583,7 @@ def chunk_kda_fwd_h_o_infer(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 16,
-    return_intermediate_states: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor | None] | tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Fused state propagation + output for BT=16 inference."""
     B, T, HV, K = kg.shape
     V = u.shape[-1]
@@ -594,11 +593,9 @@ def chunk_kda_fwd_h_o_infer(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     if cu_seqlens is None:
         N = B
-        NT = triton.cdiv(T, BT)
         chunk_offsets = None
     else:
         N = len(cu_seqlens) - 1
-        NT = len(chunk_indices)
         chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
 
     final_state = None
@@ -608,13 +605,6 @@ def chunk_kda_fwd_h_o_infer(
         else:
             final_state = kg.new_zeros(N, HV, K, V, dtype=torch.float32)
 
-    h = None
-    if return_intermediate_states:
-        if state_v_first:
-            h = kg.new_zeros(NT * N, HV, V, K, dtype=kg.dtype)
-        else:
-            h = kg.new_zeros(NT * N, HV, K, V, dtype=kg.dtype)
-
     o = torch.zeros(B, T, HV, V, device=kg.device, dtype=u.dtype)
 
     def grid(meta):
@@ -622,14 +612,12 @@ def chunk_kda_fwd_h_o_infer(
 
     chunk_kda_fwd_h_o_infer_fn[grid](
         kg=kg, w=w, u=u, gk=gk, qg=qg, Aqk=Aqk, o=o,
-        h=h, h0=initial_state, ht=final_state,
+        h=None, h0=initial_state, ht=final_state,
         cu_seqlens=cu_seqlens, chunk_offsets=chunk_offsets,
         scale=scale,
         T=T, HV=HV, K=K, V=V, BT=BT,
         STATE_V_FIRST=state_v_first,
     )
-    if return_intermediate_states:
-        return o, final_state, h
     return o, final_state
 
 
@@ -655,10 +643,9 @@ def chunk_kda_fwd_infer(
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     disable_recompute: bool = False,
-    return_intermediate_states: bool = False,
     cp_context: FLACPContext | None = None,
     **kwargs,
-) -> tuple[torch.Tensor, torch.Tensor | None] | tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     BT = chunk_size
 
     if scale is None:
@@ -690,5 +677,4 @@ def chunk_kda_fwd_infer(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_size=BT,
-        return_intermediate_states=return_intermediate_states,
     )
