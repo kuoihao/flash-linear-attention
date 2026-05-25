@@ -249,6 +249,11 @@ def benchmark_op(
     if config.skip_backward and 'fwdbwd' in modes:
         modes = [m for m in modes if m != 'fwdbwd']
 
+    if config.inference_mode:
+        modes = [m for m in modes if m != 'fwdbwd']
+
+    ctx = torch.inference_mode() if config.inference_mode else torch.enable_grad()
+
     # Per-op shape override (e.g., AttnRes uses an `L` axis not in B/T/H/D)
     if config.default_shapes is not None:
         shapes = config.default_shapes
@@ -285,14 +290,17 @@ def benchmark_op(
         extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
             inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device, **extra_shape_kw)
-            out = op_fn(**inputs, **config.extra_kwargs)
+            with ctx:
+                out = op_fn(**inputs, **config.extra_kwargs)
             out_tensor = out[0] if config.output_is_tuple else out
             do = torch.randn_like(out_tensor)
 
             def _fwdbwd_fn(inputs=inputs, do=do):
-                result = op_fn(**inputs, **config.extra_kwargs)
-                t = result[0] if config.output_is_tuple else result
-                t.backward(do)
+                with ctx:
+                    result = op_fn(**inputs, **config.extra_kwargs)
+                    t = result[0] if config.output_is_tuple else result
+                    if not config.inference_mode:
+                        t.backward(do)
 
             _warmup_autotune(_fwdbwd_fn)
         except Exception as e:
@@ -314,19 +322,22 @@ def benchmark_op(
             logger.warning(f"Input generation failed for {op_name} @ {shape_name}: {e}")
             continue
 
-        out = op_fn(**inputs, **config.extra_kwargs)
+        with ctx:
+            out = op_fn(**inputs, **config.extra_kwargs)
         out_tensor = out[0] if config.output_is_tuple else out
         do = torch.randn_like(out_tensor)
 
         for mode in modes:
             if mode == 'fwd':
                 def fn(inputs=inputs):
-                    return op_fn(**inputs, **config.extra_kwargs)
+                    with ctx:
+                        return op_fn(**inputs, **config.extra_kwargs)
             else:
                 def fn(inputs=inputs, do=do):
-                    result = op_fn(**inputs, **config.extra_kwargs)
-                    t = result[0] if config.output_is_tuple else result
-                    t.backward(do)
+                    with ctx:
+                        result = op_fn(**inputs, **config.extra_kwargs)
+                        t = result[0] if config.output_is_tuple else result
+                        t.backward(do)
 
             try:
                 ms = triton.testing.do_bench(

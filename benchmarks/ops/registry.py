@@ -142,6 +142,9 @@ class OpConfig:
             This is useful when the op's shape semantics differ from `B/T/H/D`,
             for example when AttnRes uses an extra `L` residual-source axis.
             Default: None.
+        inference_mode (bool):
+            Whether to run the op under torch.inference_mode(). Required for
+            inference-only backends (e.g. TLE). Default: False.
     """
     name: str
     import_path: str
@@ -154,6 +157,8 @@ class OpConfig:
     category: str = ''
     dim_constraints: dict | None = None
     default_shapes: dict[str, dict[str, int]] | None = None
+    inference_mode: bool = False
+    op_fn: Callable | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +333,44 @@ register_op(OpConfig(
     extra_kwargs={'use_qk_l2norm_in_kernel': True, 'safe_gate': True, 'lower_bound': -5},
     category='gate_beta',
 ))
+
+
+def _kda_infer_post_init(inputs, B, T, H, D, **kw):
+    """Add initial_state, A_log, dt_bias, scale for inference benchmark."""
+    device = inputs['q'].device
+    inputs['initial_state'] = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    inputs['A_log'] = torch.log(torch.empty(H, dtype=torch.float32, device=device).uniform_(1, 16))
+    inputs['dt_bias'] = torch.randn(H * D, dtype=torch.float32, device=device)
+    inputs['scale'] = D ** -0.5
+
+
+register_op(OpConfig(
+    name='chunk_kda_infer',
+    import_path='fla.ops.kda',
+    func_name='chunk_kda',
+    inputs={
+        'q': TensorSpec(shape_BTHD, requires_grad=False),
+        'k': TensorSpec(shape_BTHD, requires_grad=False),
+        'v': TensorSpec(shape_BTHD, requires_grad=False),
+        'g': TensorSpec(shape_BTHD, requires_grad=False),
+        'beta': TensorSpec(shape_BTH, requires_grad=False),
+    },
+    extra_kwargs={
+        'use_qk_l2norm_in_kernel': True,
+        'use_gate_in_kernel': True,
+        'use_beta_sigmoid_in_kernel': True,
+        'safe_gate': True,
+        'lower_bound': -5.0,
+        'output_final_state': True,
+        'state_v_first': True,
+    },
+    post_init=_kda_infer_post_init,
+    skip_backward=True,
+    inference_mode=True,
+    category='gate_beta',
+))
+
+
 
 # --- E: +head gate (g=[B,T,H] with logsigmoid) ---
 
